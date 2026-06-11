@@ -247,7 +247,7 @@ function Assert-RequiredModules {
         if (-not (Get-Module -ListAvailable -Name $module)) { $missing += $module }
     }
     if ($missing.Count -gt 0) {
-        throw "Missing Az PowerShell modules: $($missing -join ', '). In Cloud Shell, install with: Install-Module $($missing -join ', ') -Scope CurrentUser -Force"
+        throw "Missing Az PowerShell modules: $($missing -join ', '). Install them only from a trusted PowerShell repository and review the requested versions before use."
     }
 }
 
@@ -975,7 +975,14 @@ function New-CollapsibleSectionHtml {
 function New-TagSummary {
     param([AllowNull()][hashtable]$Tags)
     if (-not $Tags -or $Tags.Count -eq 0) { return '' }
-    return (($Tags.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ')
+    return (($Tags.GetEnumerator() | Sort-Object Name | ForEach-Object {
+        $value = if ([string]$_.Key -match '(?i)password|passwd|pwd|secret|token|credential|connection.?string|access.?key|account.?key|api.?key|client.?key|client.?secret|private.?key|shared.?access|signature|sas') {
+            '<redacted>'
+        } else {
+            $_.Value
+        }
+        "$($_.Key)=$value"
+    }) -join '; ')
 }
 
 
@@ -1606,7 +1613,7 @@ function Resolve-ReportPath {
     }
 
     $normalizedOutputPath = $OutputPath.Trim()
-    if ($normalizedOutputPath.EndsWith('/') -or $normalizedOutputPath.EndsWith('\') -or (Test-Path -Path $normalizedOutputPath -PathType Container)) {
+    if ($normalizedOutputPath.EndsWith('/') -or $normalizedOutputPath.EndsWith('\') -or (Test-Path -LiteralPath $normalizedOutputPath -PathType Container)) {
         return (Join-Path $normalizedOutputPath $defaultFileName)
     }
 
@@ -1628,6 +1635,45 @@ function Resolve-ReportPath {
     return (Join-Path $parent $timestampedLeaf)
 }
 
+function Write-SecureReport {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Content
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $parent = [System.IO.Path]::GetDirectoryName($fullPath)
+    if ($parent) { [System.IO.Directory]::CreateDirectory($parent) | Out-Null }
+
+    $stream = [System.IO.FileStream]::new(
+        $fullPath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $writer = [System.IO.StreamWriter]::new($stream, [System.Text.UTF8Encoding]::new($false))
+        try {
+            $writer.Write($Content)
+        } finally {
+            $writer.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+
+    if (-not $IsWindows) {
+        try {
+            $mode = [System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite
+            [System.IO.File]::SetUnixFileMode($fullPath, $mode)
+        } catch {
+            Add-WarningMessage 'Could not restrict report permissions to the current user. Review the output file permissions before sharing.'
+        }
+    }
+
+    return $fullPath
+}
+
 function Invoke-Main {
     Write-BlueprintBanner
     
@@ -1640,29 +1686,30 @@ function Invoke-Main {
         $targetSubscriptions = Resolve-TargetSubscriptions -Context $context
         $dataSets = [System.Collections.Generic.List[object]]::new()
 
-        foreach ($subscription in $targetSubscriptions) {
-            Write-Host "Switching to subscription: $($subscription.Name) [$($subscription.Id)]" -ForegroundColor Cyan
-            Set-AzContext -SubscriptionId $subscription.Id | Out-Null
-            $subContext = Get-AzContext
-            $dataSets.Add((Get-AvdDocumentationData -Context $subContext)) | Out-Null
+        try {
+            foreach ($subscription in $targetSubscriptions) {
+                Write-Host "Switching to subscription: $($subscription.Name)" -ForegroundColor Cyan
+                Set-AzContext -SubscriptionId $subscription.Id | Out-Null
+                $subContext = Get-AzContext
+                $dataSets.Add((Get-AvdDocumentationData -Context $subContext)) | Out-Null
+            }
+        } finally {
+            Set-AzContext -SubscriptionId $context.Subscription.Id | Out-Null
         }
 
-        Set-AzContext -SubscriptionId $context.Subscription.Id | Out-Null
         $data = Merge-DocumentationData -BaseContext $context -DataSets @($dataSets) -Subscriptions @($targetSubscriptions)
     }
 
     $html = New-HtmlReport -Data $data
     $path = Resolve-ReportPath
-    $parent = Split-Path -Parent $path
-    if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-    Set-Content -Path $path -Value $html -Encoding UTF8
+    $path = Write-SecureReport -Path $path -Content $html
     Write-Host "HTML report saved to: $path" -ForegroundColor Green
 
     if ($OpenReport) {
         if ($env:ACC_CLOUD) {
             Write-Host 'OpenReport ignored in Azure Cloud Shell. Download the HTML file from Cloud Shell instead.' -ForegroundColor Yellow
         } else {
-            Start-Process $path
+            Start-Process -FilePath $path
         }
     }
 }

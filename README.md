@@ -91,7 +91,11 @@ For complete output, include read access to IAM, monitoring, and any network/sto
 
 - The script is read-only.
 - It does not collect passwords, tokens, storage keys, VM guest data, or user profile contents.
+- Tag values whose keys look credential-related are redacted from generated reports.
 - Generated reports may contain customer architecture and IAM metadata; do not commit them.
+- On Unix-based systems, newly generated reports are restricted to the current user. Always verify file permissions before sharing or copying reports.
+- Console output and PowerShell transcripts can contain customer resource or subscription names. Treat captured terminal output as sensitive.
+- Downloaded scripts from the mutable `main` branch should be reviewed before execution. For controlled environments, use an approved commit-pinned copy.
 
 ## License
 
